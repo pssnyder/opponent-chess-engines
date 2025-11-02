@@ -5,3 +5,15 @@ This is a simple chess engine that selects moves randomly from the list of legal
 - **Random Move Selection**: Chooses moves uniformly at random from all legal moves.
 - **UCI Compatibility**: Can be integrated with any chess GUI that supports UCI.
 - **Lightweight**: Minimal computational overhead, making it suitable for quick testing or casual play.
+
+## Usage
+### UCI Interface
+```bash
+./RandomOpponent.bat
+```
+
+### Direct API
+```python
+from random_opponent import RandomOpponent
+
+engine = RandomOpponent()
