@@ -423,22 +423,27 @@ class MaterialOpponent:
         ordered_moves = self._order_moves(board, legal_moves, ply, tt_move)
         best_move = None
         best_value = -float('inf')
+        current_pv = []
         
         for i, move in enumerate(ordered_moves):
             board.push(move)
             
+            # Create new PV for this line
+            child_pv = []
+            
             # Use principal variation search for moves after the first
             if i == 0:
-                value, _ = self._search(board, depth - 1, -beta, -alpha, ply + 1)
+                value, _ = self._search(board, depth - 1, -beta, -alpha, ply + 1, True)
                 value = -value
             else:
                 # Search with null window
-                value, _ = self._search(board, depth - 1, -alpha - 1, -alpha, ply + 1)
+                value, _ = self._search(board, depth - 1, -alpha - 1, -alpha, ply + 1, True)
                 value = -value
                 
                 # Re-search if necessary
                 if alpha < value < beta:
-                    value, _ = self._search(board, depth - 1, -beta, -alpha, ply + 1)
+                    child_pv = []  # Reset PV for re-search
+                    value, _ = self._search(board, depth - 1, -beta, -alpha, ply + 1, True)
                     value = -value
             
             board.pop()
@@ -446,6 +451,9 @@ class MaterialOpponent:
             if value > best_value:
                 best_value = value
                 best_move = move
+                # Update principal variation - collect it properly
+                if ply == 0:  # Only collect PV at root
+                    current_pv = [move] + child_pv[:7]  # Limit PV length to 8 moves total
                 
             if value > alpha:
                 alpha = value
@@ -468,6 +476,27 @@ class MaterialOpponent:
         self._store_tt_entry(zobrist_key, depth, best_value, node_type, best_move)
         
         return best_value, best_move
+    
+    def _extract_pv_from_tt(self, board: chess.Board, depth: int) -> List[chess.Move]:
+        """Extract principal variation from transposition table"""
+        pv = []
+        current_board = board.copy()
+        
+        for _ in range(min(depth, 8)):  # Limit PV length
+            zobrist_key = self._get_zobrist_key(current_board)
+            entry = self.transposition_table.get(zobrist_key)
+            
+            if entry is None or entry.best_move is None:
+                break
+                
+            move = entry.best_move
+            if move not in current_board.legal_moves:
+                break
+                
+            pv.append(move)
+            current_board.push(move)
+            
+        return pv
     
     def get_best_move(self, time_left: float = 0, increment: float = 0) -> Optional[chess.Move]:
         """
@@ -497,23 +526,30 @@ class MaterialOpponent:
                 break
                 
             search_start = time.time()
-            value, move = self._search(self.board, depth, -float('inf'), float('inf'), 0)
+            value, move = self._search(self.board, depth, -float('inf'), float('inf'), 0, True)
             search_time = time.time() - search_start
             
             if move is not None:
                 best_move = move
                 best_value = value
                 
-                # Output search info
+                # Extract PV from transposition table (more reliable)
+                pv = self._extract_pv_from_tt(self.board, depth)
+                pv_string = " ".join([m.uci() for m in pv]) if pv else move.uci()
+                
+                # Output search info with full PV
                 nps = int(self.nodes_searched / max(search_time, 0.001))
-                print(f"info depth {depth} score cp {value} nodes {self.nodes_searched} "
-                      f"nps {nps} time {int(search_time * 1000)} pv {move.uci()}")
+                total_search_time = time.time() - self.start_time
+                print(f"info depth {depth} score cp {int(value)} nodes {self.nodes_searched} "
+                      f"nps {nps} time {int(total_search_time * 1000)} pv {pv_string}")
+                sys.stdout.flush()  # Ensure each depth update is immediately visible
                 
             if self._is_time_up():
                 break
         
         total_time = time.time() - self.start_time
         print(f"info string Search completed in {total_time:.3f}s, {self.nodes_searched} nodes")
+        sys.stdout.flush()  # Ensure completion message is visible
         
         return best_move
 
@@ -537,9 +573,11 @@ class UCIMaterialEngine:
                     print("option name MaxDepth type spin default 6 min 1 max 20")
                     print("option name TTSize type spin default 128 min 16 max 1024")
                     print("uciok")
+                    sys.stdout.flush()  # Ensure output is immediately visible
                     
                 elif line == "isready":
                     print("readyok")
+                    sys.stdout.flush()  # Ensure output is immediately visible
                     
                 elif line == "ucinewgame":
                     self.engine = MaterialOpponent(self.engine.max_depth)
@@ -560,6 +598,7 @@ class UCIMaterialEngine:
                 break
             except Exception as e:
                 print(f"info string Error: {e}", file=sys.stderr)
+                sys.stderr.flush()  # Ensure error messages are visible
     
     def _handle_setoption(self, line: str):
         """Handle UCI setoption command"""
@@ -612,17 +651,23 @@ class UCIMaterialEngine:
             elif part == "binc" and self.engine.board.turn == chess.BLACK:
                 increment = float(parts[i + 1]) / 1000
             elif part == "depth":
-                # Override max depth for this search and disable time management
+                # Override max depth for this search only
                 depth_override = int(parts[i + 1])
-                self.engine.max_depth = depth_override
                 time_left = 0  # No time limit when depth is specified
         
-        # Use unlimited time if depth is specified
+        # Use depth override without permanently changing engine settings
         if depth_override:
+            # Temporarily store original max_depth
+            original_max_depth = self.engine.max_depth
+            self.engine.max_depth = depth_override
             move = self.engine.get_best_move(time_left=0, increment=0)
+            # Restore original max_depth
+            self.engine.max_depth = original_max_depth
         else:
             move = self.engine.get_best_move(time_left, increment)
+        
         print(f"bestmove {move.uci() if move else '0000'}")
+        sys.stdout.flush()  # Ensure bestmove is immediately visible
 
 if __name__ == "__main__":
     engine = UCIMaterialEngine()
