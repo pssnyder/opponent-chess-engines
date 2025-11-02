@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """
-Material Opponent Chess Engine
-A UCI-compatible chess engine using material balance evaluation with minimax search.
+Chess Engine Template
+A UCI-compatible chess engine template for rapid development and testing.
 
-Features:
-- Minimax with alpha-beta pruning
+This template provides a complete foundation with:
+- Minimax search with alpha-beta pruning and iterative deepening
 - Move ordering (MVV-LVA, killer moves, history heuristic)
 - Quiescence search on captures
-- Null move pruning
+- Null move pruning and principal variation search
 - Zobrist transposition table
-- Dynamic bishop pair evaluation
-- Time management for various time controls
+- Modular evaluation system for easy customization
+- Comprehensive time management
+- Clean UCI protocol implementation
+
+Usage:
+1. Inherit from ChessEngineTemplate
+2. Override _evaluate_position() with your evaluation function
+3. Optionally override other methods for customization
+4. Instantiate with UCIEngineInterface for UCI protocol support
 """
 
 import sys
@@ -21,18 +28,25 @@ from typing import Optional, Dict, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
-# Piece values with dynamic bishop evaluation
-PIECE_VALUES = {
+# Default piece values - can be overridden in subclasses
+DEFAULT_PIECE_VALUES = {
     chess.PAWN: 100,
     chess.KNIGHT: 300,
-    chess.BISHOP: 325,  # Base value, adjusted dynamically
+    chess.BISHOP: 325,
     chess.ROOK: 500,
     chess.QUEEN: 900,
     chess.KING: 0
 }
 
-BISHOP_PAIR_BONUS = 50  # Additional value when both bishops present
-BISHOP_ALONE_PENALTY = 50  # Penalty when only one bishop remains
+# Search and evaluation constants - can be customized
+MAX_QUIESCENCE_DEPTH = 8
+MATE_SCORE = 30000
+CHECKMATE_BONUS = 900000
+CHECK_BONUS = 500000
+CAPTURE_BONUS = 400000
+KILLER_BONUS = 300000
+PROMOTION_BONUS = 200000
+PAWN_ADVANCE_BONUS = 100000
 
 class NodeType(Enum):
     EXACT = 0
@@ -49,17 +63,38 @@ class TTEntry:
     best_move: Optional[chess.Move]
     age: int
 
-class MaterialOpponent:
-    def __init__(self, max_depth: int = 6, tt_size_mb: int = 128):
+class ChessEngineTemplate:
+    """
+    Base chess engine template with complete search infrastructure.
+    
+    This class provides all the necessary components for a functional chess engine:
+    - Complete search algorithm (minimax with alpha-beta)
+    - Move ordering and pruning techniques
+    - Transposition table management
+    - Time management
+    - UCI protocol support
+    
+    To create a new engine, inherit from this class and override:
+    - _evaluate_position(): Your evaluation function
+    - piece_values: Your piece value dictionary (optional)
+    - Any other methods you want to customize
+    """
+    
+    def __init__(self, max_depth: int = 6, tt_size_mb: int = 128, 
+                 engine_name: str = "Template Engine", piece_values: Optional[Dict] = None):
         """
-        Initialize the Material Opponent engine
+        Initialize the chess engine template
         
         Args:
             max_depth: Maximum search depth
             tt_size_mb: Transposition table size in MB
+            engine_name: Name of the engine for UCI identification
+            piece_values: Custom piece values dictionary (uses defaults if None)
         """
         self.board = chess.Board()
         self.max_depth = max_depth
+        self.engine_name = engine_name
+        self.piece_values = piece_values or DEFAULT_PIECE_VALUES.copy()
         self.start_time = 0
         self.time_limit = 0
         self.nodes_searched = 0
@@ -160,14 +195,53 @@ class MaterialOpponent:
         else:  # < 1 minute
             return min(time_left / 10 + increment * 0.8, 5)
     
-    def _evaluate_material(self, board: chess.Board) -> int:
+    def _evaluate_position(self, board: chess.Board) -> int:
         """
-        Evaluate position based on material balance with dynamic bishop evaluation
+        Evaluate the current position - OVERRIDE THIS METHOD IN SUBCLASSES
+        
+        This is the main evaluation function that should be customized for each engine.
+        The default implementation provides a simple material balance evaluation
+        that can serve as a baseline.
+        
+        Args:
+            board: Current chess position
+            
+        Returns:
+            Evaluation score in centipawns (positive = good for side to move)
+        """
+        return self._evaluate_material_simple(board)
+    
+    def _evaluate_material_simple(self, board: chess.Board) -> int:
+        """
+        Simple material balance evaluation (baseline implementation)
         
         Returns:
             Evaluation score in centipawns (positive = good for white)
         """
         score = 0
+        
+        for piece_type in chess.PIECE_TYPES:
+            if piece_type == chess.KING:
+                continue
+                
+            white_count = len(board.pieces(piece_type, chess.WHITE))
+            black_count = len(board.pieces(piece_type, chess.BLACK))
+            piece_value = self.piece_values[piece_type]
+            score += (white_count - black_count) * piece_value
+        
+        return score if board.turn == chess.WHITE else -score
+    
+    def _evaluate_material_with_bishop_pairs(self, board: chess.Board) -> int:
+        """
+        Material evaluation with dynamic bishop pair evaluation (example implementation)
+        Shows how to extend the basic evaluation with additional heuristics.
+        
+        Returns:
+            Evaluation score in centipawns (positive = good for white)
+        """
+        score = 0
+        bishop_pair_bonus = 50
+        bishop_alone_penalty = 50
         
         white_bishops = len(board.pieces(chess.BISHOP, chess.WHITE))
         black_bishops = len(board.pieces(chess.BISHOP, chess.BLACK))
@@ -181,22 +255,22 @@ class MaterialOpponent:
             
             if piece_type == chess.BISHOP:
                 # Dynamic bishop evaluation
-                white_bishop_value = PIECE_VALUES[chess.BISHOP]
-                black_bishop_value = PIECE_VALUES[chess.BISHOP]
+                white_bishop_value = self.piece_values[chess.BISHOP]
+                black_bishop_value = self.piece_values[chess.BISHOP]
                 
                 if white_bishops == 2:
-                    white_bishop_value += BISHOP_PAIR_BONUS // 2  # Split bonus between bishops
+                    white_bishop_value += bishop_pair_bonus // 2
                 elif white_bishops == 1:
-                    white_bishop_value -= BISHOP_ALONE_PENALTY
+                    white_bishop_value -= bishop_alone_penalty
                     
                 if black_bishops == 2:
-                    black_bishop_value += BISHOP_PAIR_BONUS // 2
+                    black_bishop_value += bishop_pair_bonus // 2
                 elif black_bishops == 1:
-                    black_bishop_value -= BISHOP_ALONE_PENALTY
+                    black_bishop_value -= bishop_alone_penalty
                     
                 score += white_count * white_bishop_value - black_count * black_bishop_value
             else:
-                piece_value = PIECE_VALUES[piece_type]
+                piece_value = self.piece_values[piece_type]
                 score += white_count * piece_value - black_count * piece_value
         
         # Small bonus for piece count diversity (prefer pieces over pawns)
@@ -219,11 +293,11 @@ class MaterialOpponent:
         Returns:
             Evaluation score
         """
-        if self._is_time_up() or depth > 8:  # Limit quiescence depth
-            return self._evaluate_material(board)
+        if self._is_time_up() or depth > MAX_QUIESCENCE_DEPTH:  # Limit quiescence depth
+            return self._evaluate_position(board)
             
         self.nodes_searched += 1
-        stand_pat = self._evaluate_material(board)
+        stand_pat = self._evaluate_position(board)
         
         if stand_pat >= beta:
             return beta
@@ -261,8 +335,8 @@ class MaterialOpponent:
         if victim is None or attacker is None:
             return 0
             
-        victim_value = PIECE_VALUES.get(victim.piece_type, 0)
-        attacker_value = PIECE_VALUES.get(attacker.piece_type, 0)
+        victim_value = self.piece_values.get(victim.piece_type, 0)
+        attacker_value = self.piece_values.get(attacker.piece_type, 0)
         
         return victim_value * 10 - attacker_value
     
@@ -305,7 +379,7 @@ class MaterialOpponent:
                 score = 300000
             # Pawn promotions
             elif move.promotion:
-                score = 200000 + PIECE_VALUES.get(move.promotion, 0)
+                score = PROMOTION_BONUS + self.piece_values.get(move.promotion, 0)
             # Pawn advances (towards 7th/2nd rank)
             else:
                 piece = board.piece_at(move.from_square)
@@ -382,12 +456,12 @@ class MaterialOpponent:
             Tuple of (evaluation, best_move)
         """
         if self._is_time_up():
-            return self._evaluate_material(board), None
+            return self._evaluate_position(board), None
             
         # Check for terminal nodes
         if board.is_game_over():
             if board.is_checkmate():
-                return -30000 + ply, None  # Prefer quicker mates
+                return -MATE_SCORE + ply, None  # Prefer quicker mates
             else:
                 return 0, None  # Draw
         
@@ -405,7 +479,7 @@ class MaterialOpponent:
         
         # Null move pruning
         if (do_null_move and depth >= 3 and not board.is_check() and 
-            self._evaluate_material(board) >= beta):
+            self._evaluate_position(board) >= beta):
             
             board.push(chess.Move.null())
             null_score, _ = self._search(board, depth - 3, -beta, -beta + 1, ply + 1, False)
@@ -418,7 +492,7 @@ class MaterialOpponent:
         # Generate and order moves
         legal_moves = list(board.legal_moves)
         if not legal_moves:
-            return self._evaluate_material(board), None
+            return self._evaluate_position(board), None
             
         ordered_moves = self._order_moves(board, legal_moves, ply, tt_move)
         best_move = None
@@ -517,11 +591,20 @@ class MaterialOpponent:
         
         return best_move
 
-class UCIMaterialEngine:
-    """UCI interface for Material Opponent engine"""
+class UCIEngineInterface:
+    """UCI interface for chess engines built on ChessEngineTemplate"""
     
-    def __init__(self):
-        self.engine = MaterialOpponent()
+    def __init__(self, engine_class=None, **engine_kwargs):
+        """
+        Initialize UCI interface with a chess engine
+        
+        Args:
+            engine_class: Class to instantiate (defaults to ChessEngineTemplate)
+            **engine_kwargs: Additional arguments passed to engine constructor
+        """
+        if engine_class is None:
+            engine_class = ChessEngineTemplate
+        self.engine = engine_class(**engine_kwargs)
         
     def run(self):
         """Main UCI loop"""
@@ -532,7 +615,7 @@ class UCIMaterialEngine:
                     continue
                     
                 if line == "uci":
-                    print("id name Material Opponent")
+                    print(f"id name {self.engine.engine_name}")
                     print("id author OpponentEngine")
                     print("option name MaxDepth type spin default 6 min 1 max 20")
                     print("option name TTSize type spin default 128 min 16 max 1024")
@@ -542,7 +625,11 @@ class UCIMaterialEngine:
                     print("readyok")
                     
                 elif line == "ucinewgame":
-                    self.engine = MaterialOpponent(self.engine.max_depth)
+                    engine_class = type(self.engine)
+                    self.engine = engine_class(
+                        max_depth=self.engine.max_depth,
+                        piece_values=self.engine.piece_values.copy()
+                    )
                     
                 elif line.startswith("setoption"):
                     self._handle_setoption(line)
@@ -572,7 +659,12 @@ class UCIMaterialEngine:
                 self.engine.max_depth = max(1, min(20, int(value)))
             elif name == "TTSize":
                 tt_size = max(16, min(1024, int(value)))
-                self.engine = MaterialOpponent(self.engine.max_depth, tt_size)
+                engine_class = type(self.engine)
+                self.engine = engine_class(
+                    max_depth=self.engine.max_depth,
+                    tt_size_mb=tt_size,
+                    piece_values=self.engine.piece_values.copy()
+                )
     
     def _handle_position(self, line: str):
         """Handle UCI position command"""
@@ -624,6 +716,66 @@ class UCIMaterialEngine:
             move = self.engine.get_best_move(time_left, increment)
         print(f"bestmove {move.uci() if move else '0000'}")
 
+
+# Example implementations demonstrating how to use the template
+
+class MaterialEngine(ChessEngineTemplate):
+    """Example: Simple material-only engine"""
+    
+    def __init__(self, **kwargs):
+        kwargs.setdefault('engine_name', 'Material Engine')
+        super().__init__(**kwargs)
+    
+    def _evaluate_position(self, board: chess.Board) -> int:
+        """Simple material balance evaluation"""
+        return self._evaluate_material_simple(board)
+
+
+class MaterialWithBishopPairs(ChessEngineTemplate):
+    """Example: Material engine with bishop pair evaluation"""
+    
+    def __init__(self, **kwargs):
+        kwargs.setdefault('engine_name', 'Material + Bishop Pairs')
+        super().__init__(**kwargs)
+    
+    def _evaluate_position(self, board: chess.Board) -> int:
+        """Material evaluation with dynamic bishop pairs"""
+        return self._evaluate_material_with_bishop_pairs(board)
+
+
+class CustomPieceValues(ChessEngineTemplate):
+    """Example: Engine with custom piece values"""
+    
+    def __init__(self, **kwargs):
+        custom_values = {
+            chess.PAWN: 100,
+            chess.KNIGHT: 320,     # Slightly higher value for knights
+            chess.BISHOP: 330,     # Slightly higher value for bishops
+            chess.ROOK: 500,
+            chess.QUEEN: 900,
+            chess.KING: 0
+        }
+        kwargs.setdefault('engine_name', 'Custom Values Engine')
+        kwargs.setdefault('piece_values', custom_values)
+        super().__init__(**kwargs)
+
+
+# Example of how to run different engines
 if __name__ == "__main__":
-    engine = UCIMaterialEngine()
-    engine.run()
+    import sys
+    
+    # You can easily switch between different engine implementations
+    if len(sys.argv) > 1:
+        engine_type = sys.argv[1].lower()
+        if engine_type == "material":
+            interface = UCIEngineInterface(MaterialEngine)
+        elif engine_type == "bishops":
+            interface = UCIEngineInterface(MaterialWithBishopPairs)
+        elif engine_type == "custom":
+            interface = UCIEngineInterface(CustomPieceValues)
+        else:
+            interface = UCIEngineInterface()  # Default template
+    else:
+        interface = UCIEngineInterface()  # Default template
+    
+    interface.run()
