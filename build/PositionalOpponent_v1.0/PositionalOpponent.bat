@@ -1,13 +1,13 @@
 @echo off
 
 REM Opponent Engine
-REM Engine Type: Material-Driven Engine
+REM Engine Type: Position-Driven Engine
 REM Updated: November 2025
 
 cd /d "%~dp0"
 
 REM Launch engine with Python 3.13
-"C:\Users\patss\AppData\Local\Programs\Python\Python313\python.exe" material_opponent.py
+"C:\Users\patss\AppData\Local\Programs\Python\Python313\python.exe" positional_opponent.py
 
 REM Error handling for Arena
 if errorlevel 1 (
