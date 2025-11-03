@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Positional Chess Engine
-A UCI-compatible chess engine that uses piece-square tables for position-based evaluation.
+Coverage Opponent Chess Engine
+A UCI-compatible chess engine that uses piece mobility and coverage for evaluation.
 
-This engine replaces static material values with dynamic position-based piece values using
-comprehensive piece-square tables (PSTs). Each piece's value depends entirely on where
-it's positioned on the board, creating a more positional playing style.
+This engine evaluates positions based on piece "opportunity value" - the number of
+legal moves each piece has plus bonuses for attacking occupied squares. It has no
+understanding of traditional material values and makes all decisions based on:
+- Piece mobility (number of legal squares)
+- Attack coverage (threats on occupied squares)
 
-Key Features:
-- Complete piece-square tables for all pieces
-- Dynamic piece values from 0 to full potential (e.g., pawns 0-900)
-- Same search framework as template (minimax, alpha-beta, etc.)
-- Minimal changes from template - only evaluation method differs
+Key Concept: A piece's value = mobility + occupied square attacks
+- Mobile, active pieces are highly valued
+- Pieces attacking enemy pieces get bonuses
+- No static material or positional knowledge
 
-Usage:
-    python positional_opponent.py
+This creates a hyperactive, mobility-focused playing style that can sacrifice
+traditional material for active piece play and board control.
 """
 
 import sys
@@ -25,94 +26,7 @@ from typing import Optional, Dict, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
-# Piece-Square Tables (values in centipawns)
-# White perspective - flip for black pieces
-
-# Pawn PST: 0 to 900 (full queen potential when promoted)
-PAWN_PST = [
-    [  0,  0,  0,  0,  0,  0,  0,  0],  # 1st rank (shouldn't occur)
-    [ 50, 50, 50, 50, 50, 50, 50, 50],  # 2nd rank  
-    [ 60, 60, 70, 80, 80, 70, 60, 60],  # 3rd rank
-    [ 70, 70, 80, 90, 90, 80, 70, 70],  # 4th rank
-    [100,100,110,120,120,110,100,100],  # 5th rank
-    [200,200,220,250,250,220,200,200],  # 6th rank
-    [400,400,450,500,500,450,400,400],  # 7th rank
-    [900,900,900,900,900,900,900,900],  # 8th rank (promotion)
-]
-
-# Knight PST: 200 to 400 (centralized knights are very strong)
-KNIGHT_PST = [
-    [200,220,240,250,250,240,220,200],  # 1st rank
-    [220,240,260,270,270,260,240,220],  # 2nd rank
-    [240,260,300,320,320,300,260,240],  # 3rd rank
-    [250,270,320,350,350,320,270,250],  # 4th rank
-    [250,270,320,350,350,320,270,250],  # 5th rank
-    [240,260,300,320,320,300,260,240],  # 6th rank
-    [220,240,260,270,270,260,240,220],  # 7th rank
-    [200,220,240,250,250,240,220,200],  # 8th rank
-]
-
-# Bishop PST: 250 to 400 (long diagonals and center control)
-BISHOP_PST = [
-    [250,260,270,280,280,270,260,250],  # 1st rank
-    [260,300,290,290,290,290,300,260],  # 2nd rank
-    [270,290,320,300,300,320,290,270],  # 3rd rank
-    [280,290,300,350,350,300,290,280],  # 4th rank
-    [280,290,300,350,350,300,290,280],  # 5th rank
-    [270,290,320,300,300,320,290,270],  # 6th rank
-    [260,300,290,290,290,290,300,260],  # 7th rank
-    [250,260,270,280,280,270,260,250],  # 8th rank
-]
-
-# Rook PST: 400 to 600 (open files and back rank)
-ROOK_PST = [
-    [500,510,520,530,530,520,510,500],  # 1st rank (back rank power)
-    [450,460,470,480,480,470,460,450],  # 2nd rank
-    [450,460,470,480,480,470,460,450],  # 3rd rank
-    [450,460,470,480,480,470,460,450],  # 4th rank
-    [450,460,470,480,480,470,460,450],  # 5th rank
-    [450,460,470,480,480,470,460,450],  # 6th rank
-    [550,560,570,580,580,570,560,550],  # 7th rank (penetration)
-    [500,510,520,530,530,520,510,500],  # 8th rank
-]
-
-# Queen PST: 700 to 1100 (centralized and active)
-QUEEN_PST = [
-    [700,720,740,760,760,740,720,700],  # 1st rank
-    [720,750,780,800,800,780,750,720],  # 2nd rank
-    [740,780,850,900,900,850,780,740],  # 3rd rank
-    [760,800,900,1000,1000,900,800,760], # 4th rank
-    [760,800,900,1000,1000,900,800,760], # 5th rank
-    [740,780,850,900,900,850,780,740],  # 6th rank
-    [720,750,780,800,800,780,750,720],  # 7th rank
-    [700,720,740,760,760,740,720,700],  # 8th rank
-]
-
-# King PST (Middlegame): Safety first, corner protection
-KING_MIDDLEGAME_PST = [
-    [ 20, 30, 10,  0,  0, 10, 30, 20],  # 1st rank (castling positions)
-    [ 20, 20,  0,  0,  0,  0, 20, 20],  # 2nd rank
-    [-10,-20,-20,-20,-20,-20,-20,-10],  # 3rd rank (exposed)
-    [-20,-30,-30,-40,-40,-30,-30,-20],  # 4th rank (very exposed)
-    [-30,-40,-40,-50,-50,-40,-40,-30],  # 5th rank (danger zone)
-    [-30,-40,-40,-50,-50,-40,-40,-30],  # 6th rank (danger zone)
-    [-30,-40,-40,-50,-50,-40,-40,-30],  # 7th rank (danger zone)
-    [-30,-40,-40,-50,-50,-40,-40,-30],  # 8th rank (danger zone)
-]
-
-# King PST (Endgame): Centralization becomes important
-KING_ENDGAME_PST = [
-    [-50,-40,-30,-20,-20,-30,-40,-50],  # 1st rank (edge is bad)
-    [-30,-20,-10,  0,  0,-10,-20,-30],  # 2nd rank
-    [-30,-10, 20, 30, 30, 20,-10,-30],  # 3rd rank
-    [-30,-10, 30, 40, 40, 30,-10,-30],  # 4th rank (center is good)
-    [-30,-10, 30, 40, 40, 30,-10,-30],  # 5th rank (center is good)
-    [-30,-10, 20, 30, 30, 20,-10,-30],  # 6th rank
-    [-30,-20,-10,  0,  0,-10,-20,-30],  # 7th rank
-    [-50,-40,-30,-20,-20,-30,-40,-50],  # 8th rank (edge is bad)
-]
-
-# Search and evaluation constants
+# Search and evaluation constants - can be customized
 MAX_QUIESCENCE_DEPTH = 8
 MATE_SCORE = 30000
 CHECKMATE_BONUS = 900000
@@ -121,6 +35,10 @@ CAPTURE_BONUS = 400000
 KILLER_BONUS = 300000
 PROMOTION_BONUS = 200000
 PAWN_ADVANCE_BONUS = 100000
+
+# Coverage evaluation constants
+MOBILITY_VALUE = 1      # +1 per legal square
+OCCUPIED_ATTACK_BONUS = 1  # +1 for attacking occupied square
 
 class NodeType(Enum):
     EXACT = 0
@@ -137,18 +55,22 @@ class TTEntry:
     best_move: Optional[chess.Move]
     age: int
 
-class PositionalOpponent:
+class CoverageOpponent:
     """
-    Positional chess engine using piece-square tables for evaluation.
+    Coverage-based chess engine using piece mobility and attack opportunities.
     
-    This engine evaluates positions based entirely on piece placement rather
-    than static material values. Each piece's value is determined by its
-    position on the board using comprehensive piece-square tables.
+    This engine evaluates positions based entirely on piece activity:
+    - Mobility: Each legal square a piece can move to adds value
+    - Attack coverage: Pieces attacking occupied squares get bonuses
+    - No traditional material understanding
+    
+    The result is a hyperactive, mobility-driven playing style that values
+    piece activity over traditional material considerations.
     """
     
     def __init__(self, max_depth: int = 6, tt_size_mb: int = 128):
         """
-        Initialize the positional chess engine
+        Initialize the coverage chess engine
         
         Args:
             max_depth: Maximum search depth
@@ -256,87 +178,90 @@ class PositionalOpponent:
         else:  # < 1 minute
             return min(time_left / 10 + increment * 0.8, 5)
     
-    def _get_piece_square_value(self, piece: chess.Piece, square: chess.Square, is_endgame: bool = False) -> int:
+    def _calculate_piece_coverage(self, board: chess.Board, square: chess.Square, piece: chess.Piece) -> int:
         """
-        Get the value of a piece based on its position using piece-square tables
+        Calculate the opportunity value of a piece based on mobility and attacks
         
         Args:
-            piece: The chess piece
-            square: The square the piece is on
-            is_endgame: Whether we're in the endgame (affects king PST)
+            board: Current position
+            square: Square the piece is on
+            piece: The piece to evaluate
             
         Returns:
-            Value of the piece in this position (centipawns)
+            Opportunity value (mobility + occupied attack bonuses)
         """
-        rank = chess.square_rank(square)
-        file = chess.square_file(square)
+        coverage_value = 0
         
-        # For black pieces, flip the rank to get the equivalent white perspective
-        if piece.color == chess.BLACK:
-            rank = 7 - rank
+        # Get all squares this piece attacks/can move to
+        attacks = board.attacks(square)
+        
+        for target_square in attacks:
+            # +1 for each square the piece can move to (mobility)
+            coverage_value += MOBILITY_VALUE
             
-        piece_type = piece.piece_type
+            # +1 bonus if attacking an occupied square (threat value)
+            target_piece = board.piece_at(target_square)
+            if target_piece is not None:
+                coverage_value += OCCUPIED_ATTACK_BONUS
         
-        if piece_type == chess.PAWN:
-            value = PAWN_PST[rank][file]
-        elif piece_type == chess.KNIGHT:
-            value = KNIGHT_PST[rank][file]
-        elif piece_type == chess.BISHOP:
-            value = BISHOP_PST[rank][file]
-        elif piece_type == chess.ROOK:
-            value = ROOK_PST[rank][file]
-        elif piece_type == chess.QUEEN:
-            value = QUEEN_PST[rank][file]
-        elif piece_type == chess.KING:
-            if is_endgame:
-                value = KING_ENDGAME_PST[rank][file]
-            else:
-                value = KING_MIDDLEGAME_PST[rank][file]
-        else:
-            value = 0
-            
-        return value if piece.color == chess.WHITE else -value
-    
-    def _is_endgame(self, board: chess.Board) -> bool:
-        """
-        Determine if we're in the endgame phase
-        Simple heuristic: endgame if queens are off or material is low
-        """
-        # Queens are gone
-        if not board.pieces(chess.QUEEN, chess.WHITE) and not board.pieces(chess.QUEEN, chess.BLACK):
-            return True
-            
-        # Low material count (each side has less than a rook + minor piece)
-        white_material = (len(board.pieces(chess.ROOK, chess.WHITE)) * 500 +
-                         len(board.pieces(chess.BISHOP, chess.WHITE)) * 300 +
-                         len(board.pieces(chess.KNIGHT, chess.WHITE)) * 300 +
-                         len(board.pieces(chess.QUEEN, chess.WHITE)) * 900)
-        
-        black_material = (len(board.pieces(chess.ROOK, chess.BLACK)) * 500 +
-                         len(board.pieces(chess.BISHOP, chess.BLACK)) * 300 +
-                         len(board.pieces(chess.KNIGHT, chess.BLACK)) * 300 +
-                         len(board.pieces(chess.QUEEN, chess.BLACK)) * 900)
-        
-        return white_material < 800 and black_material < 800
+        return coverage_value
     
     def _evaluate_position(self, board: chess.Board) -> int:
         """
-        Evaluate the current position using piece-square tables
+        Evaluate position based on piece coverage and mobility
+        
+        No traditional material understanding - only opportunity values:
+        - Each legal square a piece can move to: +1
+        - Each occupied square a piece attacks: +1 bonus
         
         Args:
             board: Current chess position
             
         Returns:
-            Evaluation score in centipawns (positive = good for side to move)
+            Evaluation score (positive = good for side to move)
         """
-        score = 0
-        is_endgame = self._is_endgame(board)
+        white_coverage = 0
+        black_coverage = 0
         
-        # Sum up all piece values based on their positions
+        # Calculate coverage for all pieces
         for square in chess.SQUARES:
             piece = board.piece_at(square)
             if piece:
-                score += self._get_piece_square_value(piece, square, is_endgame)
+                piece_coverage = self._calculate_piece_coverage(board, square, piece)
+                
+                if piece.color == chess.WHITE:
+                    white_coverage += piece_coverage
+                else:
+                    black_coverage += piece_coverage
+        
+        # Return score from perspective of side to move
+        score = white_coverage - black_coverage
+        return score if board.turn == chess.WHITE else -score
+    
+    def _evaluate_material_simple(self, board: chess.Board) -> int:
+        """
+        Fallback material evaluation for move ordering only
+        Uses approximate values for MVV-LVA scoring
+        """
+        # Simple piece values for move ordering (not used in main evaluation)
+        piece_values = {
+            chess.PAWN: 1,
+            chess.KNIGHT: 3,
+            chess.BISHOP: 3,
+            chess.ROOK: 5,
+            chess.QUEEN: 9,
+            chess.KING: 0
+        }
+        
+        score = 0
+        for piece_type in chess.PIECE_TYPES:
+            if piece_type == chess.KING:
+                continue
+                
+            white_count = len(board.pieces(piece_type, chess.WHITE))
+            black_count = len(board.pieces(piece_type, chess.BLACK))
+            piece_value = piece_values[piece_type]
+            score += (white_count - black_count) * piece_value
         
         return score if board.turn == chess.WHITE else -score
     
@@ -353,7 +278,7 @@ class PositionalOpponent:
         Returns:
             Evaluation score
         """
-        if self._is_time_up() or depth > MAX_QUIESCENCE_DEPTH:
+        if self._is_time_up() or depth > MAX_QUIESCENCE_DEPTH:  # Limit quiescence depth
             return self._evaluate_position(board)
             
         self.nodes_searched += 1
@@ -385,7 +310,10 @@ class PositionalOpponent:
         return alpha
     
     def _mvv_lva_score(self, board: chess.Board, move: chess.Move) -> int:
-        """Most Valuable Victim - Least Valuable Attacker scoring"""
+        """
+        Most Valuable Victim - Least Valuable Attacker scoring
+        Uses approximate piece values for move ordering only
+        """
         if not board.is_capture(move):
             return 0
             
@@ -395,26 +323,20 @@ class PositionalOpponent:
         if victim is None or attacker is None:
             return 0
         
-        # Use PST values for MVV-LVA (approximate piece values)
-        victim_value = self._get_approximate_piece_value(victim.piece_type)
-        attacker_value = self._get_approximate_piece_value(attacker.piece_type)
+        # Approximate values for move ordering (not evaluation)
+        piece_values = {
+            chess.PAWN: 1,
+            chess.KNIGHT: 3,
+            chess.BISHOP: 3,
+            chess.ROOK: 5,
+            chess.QUEEN: 9,
+            chess.KING: 0
+        }
+        
+        victim_value = piece_values.get(victim.piece_type, 0)
+        attacker_value = piece_values.get(attacker.piece_type, 0)
         
         return victim_value * 10 - attacker_value
-    
-    def _get_approximate_piece_value(self, piece_type: int) -> int:
-        """Get approximate piece value for MVV-LVA scoring"""
-        if piece_type == chess.PAWN:
-            return 100
-        elif piece_type == chess.KNIGHT:
-            return 300
-        elif piece_type == chess.BISHOP:
-            return 325
-        elif piece_type == chess.ROOK:
-            return 500
-        elif piece_type == chess.QUEEN:
-            return 900
-        else:
-            return 0
     
     def _order_moves(self, board: chess.Board, moves: List[chess.Move], ply: int, 
                      tt_move: Optional[chess.Move] = None) -> List[chess.Move]:
@@ -455,7 +377,9 @@ class PositionalOpponent:
                 score = 300000
             # Pawn promotions
             elif move.promotion:
-                score = PROMOTION_BONUS + self._get_approximate_piece_value(move.promotion)
+                # Approximate promotion values for move ordering
+                promo_values = {chess.QUEEN: 9, chess.ROOK: 5, chess.BISHOP: 3, chess.KNIGHT: 3}
+                score = PROMOTION_BONUS + promo_values.get(move.promotion, 0)
             # Pawn advances (towards 7th/2nd rank)
             else:
                 piece = board.piece_at(move.from_square)
@@ -670,12 +594,12 @@ class PositionalOpponent:
         return best_move
 
 
-class UCIPositionalEngine:
-    """UCI interface for the positional chess engine"""
+class UCICoverageEngine:
+    """UCI interface for the coverage chess engine"""
     
     def __init__(self):
-        """Initialize UCI interface with positional engine"""
-        self.engine = PositionalOpponent()
+        """Initialize UCI interface with coverage engine"""
+        self.engine = CoverageOpponent()
         
     def run(self):
         """Main UCI loop"""
@@ -686,7 +610,7 @@ class UCIPositionalEngine:
                     continue
                     
                 if line == "uci":
-                    print("id name Positional Opponent v1.0")
+                    print("id name Coverage Opponent v1.0")
                     print("id author OpponentEngine")
                     print("option name MaxDepth type spin default 6 min 1 max 20")
                     print("option name TTSize type spin default 128 min 16 max 1024")
@@ -696,7 +620,7 @@ class UCIPositionalEngine:
                     print("readyok")
                     
                 elif line == "ucinewgame":
-                    self.engine = PositionalOpponent(
+                    self.engine = CoverageOpponent(
                         max_depth=self.engine.max_depth,
                         tt_size_mb=128
                     )
@@ -729,7 +653,7 @@ class UCIPositionalEngine:
                 self.engine.max_depth = max(1, min(20, int(value)))
             elif name == "TTSize":
                 tt_size = max(16, min(1024, int(value)))
-                self.engine = PositionalOpponent(
+                self.engine = CoverageOpponent(
                     max_depth=self.engine.max_depth,
                     tt_size_mb=tt_size
                 )
@@ -792,5 +716,5 @@ class UCIPositionalEngine:
 
 # Main execution
 if __name__ == "__main__":
-    uci_engine = UCIPositionalEngine()
+    uci_engine = UCICoverageEngine()
     uci_engine.run()
