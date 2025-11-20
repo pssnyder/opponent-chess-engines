@@ -1,38 +1,20 @@
 #!/usr/bin/env python3
 """
-Chess Engine Template v2.0
-A UCI-compatible chess engine template for rapid development and testing.
+Positional Chess Engine
+A UCI-compatible chess engine that uses piece-square tables for position-based evaluation.
 
-CHANGELOG v2.0 (November 2025):
-- Added sys.stdout.flush() for proper UCI output persistence
-- Made piece_values truly optional for non-material engines
-- Separated move ordering values from evaluation values
-- Added _get_approximate_piece_value() helper method
-- Improved UCI interface to handle engines without piece_values
-- Enhanced documentation for customization points
-- Better support for diverse evaluation strategies
+This engine replaces static material values with dynamic position-based piece values using
+comprehensive piece-square tables (PSTs). Each piece's value depends entirely on where
+it's positioned on the board, creating a more positional playing style.
 
-This template provides a complete foundation with:
-- Minimax search with alpha-beta pruning and iterative deepening
-- Move ordering (MVV-LVA, killer moves, history heuristic)
-- Quiescence search on captures
-- Null move pruning and principal variation search
-- Zobrist transposition table
-- Modular evaluation system for easy customization
-- Comprehensive time management
-- Clean UCI protocol implementation
+Key Features:
+- Complete piece-square tables for all pieces
+- Dynamic piece values from 0 to full potential (e.g., pawns 0-900)
+- Same search framework as template (minimax, alpha-beta, etc.)
+- Minimal changes from template - only evaluation method differs
 
 Usage:
-1. Inherit from ChessEngineTemplate
-2. Override _evaluate_position() with your evaluation function
-3. Optionally override other methods for customization
-4. Instantiate with UCIEngineInterface for UCI protocol support
-
-Example Engines:
-- Material-based: Use piece_values parameter
-- Positional: Override _evaluate_position() with PST logic
-- Mobility/Coverage: Override _evaluate_position() with dynamic calculation
-- Hybrid: Combine multiple evaluation factors
+    python positional_opponent.py
 """
 
 import sys
@@ -43,29 +25,94 @@ from typing import Optional, Dict, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
-# Default piece values for material-based engines
-# Other engine types can ignore these
-DEFAULT_PIECE_VALUES = {
-    chess.PAWN: 100,
-    chess.KNIGHT: 300,
-    chess.BISHOP: 325,
-    chess.ROOK: 500,
-    chess.QUEEN: 900,
-    chess.KING: 0
-}
+# Piece-Square Tables (values in centipawns)
+# White perspective - flip for black pieces
 
-# Approximate piece values for move ordering
-# Used internally by MVV-LVA even for non-material engines
-MOVE_ORDERING_VALUES = {
-    chess.PAWN: 1,
-    chess.KNIGHT: 3,
-    chess.BISHOP: 3,
-    chess.ROOK: 5,
-    chess.QUEEN: 9,
-    chess.KING: 0
-}
+# Pawn PST: 0 to 900 (full queen potential when promoted)
+PAWN_PST = [
+    [  0,  0,  0,  0,  0,  0,  0,  0],  # 1st rank (shouldn't occur)
+    [ 50, 50, 50, 50, 50, 50, 50, 50],  # 2nd rank  
+    [ 60, 60, 70, 80, 80, 70, 60, 60],  # 3rd rank
+    [ 70, 70, 80, 90, 90, 80, 70, 70],  # 4th rank
+    [100,100,110,120,120,110,100,100],  # 5th rank
+    [200,200,220,250,250,220,200,200],  # 6th rank
+    [400,400,450,500,500,450,400,400],  # 7th rank
+    [900,900,900,900,900,900,900,900],  # 8th rank (promotion)
+]
 
-# Search and evaluation constants - can be customized
+# Knight PST: 200 to 400 (centralized knights are very strong)
+KNIGHT_PST = [
+    [200,220,240,250,250,240,220,200],  # 1st rank
+    [220,240,260,270,270,260,240,220],  # 2nd rank
+    [240,260,300,320,320,300,260,240],  # 3rd rank
+    [250,270,320,350,350,320,270,250],  # 4th rank
+    [250,270,320,350,350,320,270,250],  # 5th rank
+    [240,260,300,320,320,300,260,240],  # 6th rank
+    [220,240,260,270,270,260,240,220],  # 7th rank
+    [200,220,240,250,250,240,220,200],  # 8th rank
+]
+
+# Bishop PST: 250 to 400 (long diagonals and center control)
+BISHOP_PST = [
+    [250,260,270,280,280,270,260,250],  # 1st rank
+    [260,300,290,290,290,290,300,260],  # 2nd rank
+    [270,290,320,300,300,320,290,270],  # 3rd rank
+    [280,290,300,350,350,300,290,280],  # 4th rank
+    [280,290,300,350,350,300,290,280],  # 5th rank
+    [270,290,320,300,300,320,290,270],  # 6th rank
+    [260,300,290,290,290,290,300,260],  # 7th rank
+    [250,260,270,280,280,270,260,250],  # 8th rank
+]
+
+# Rook PST: 400 to 600 (open files and back rank)
+ROOK_PST = [
+    [500,510,520,530,530,520,510,500],  # 1st rank (back rank power)
+    [450,460,470,480,480,470,460,450],  # 2nd rank
+    [450,460,470,480,480,470,460,450],  # 3rd rank
+    [450,460,470,480,480,470,460,450],  # 4th rank
+    [450,460,470,480,480,470,460,450],  # 5th rank
+    [450,460,470,480,480,470,460,450],  # 6th rank
+    [550,560,570,580,580,570,560,550],  # 7th rank (penetration)
+    [500,510,520,530,530,520,510,500],  # 8th rank
+]
+
+# Queen PST: 700 to 1100 (centralized and active)
+QUEEN_PST = [
+    [700,720,740,760,760,740,720,700],  # 1st rank
+    [720,750,780,800,800,780,750,720],  # 2nd rank
+    [740,780,850,900,900,850,780,740],  # 3rd rank
+    [760,800,900,1000,1000,900,800,760], # 4th rank
+    [760,800,900,1000,1000,900,800,760], # 5th rank
+    [740,780,850,900,900,850,780,740],  # 6th rank
+    [720,750,780,800,800,780,750,720],  # 7th rank
+    [700,720,740,760,760,740,720,700],  # 8th rank
+]
+
+# King PST (Middlegame): Safety first, corner protection
+KING_MIDDLEGAME_PST = [
+    [ 20, 30, 10,  0,  0, 10, 30, 20],  # 1st rank (castling positions)
+    [ 20, 20,  0,  0,  0,  0, 20, 20],  # 2nd rank
+    [-10,-20,-20,-20,-20,-20,-20,-10],  # 3rd rank (exposed)
+    [-20,-30,-30,-40,-40,-30,-30,-20],  # 4th rank (very exposed)
+    [-30,-40,-40,-50,-50,-40,-40,-30],  # 5th rank (danger zone)
+    [-30,-40,-40,-50,-50,-40,-40,-30],  # 6th rank (danger zone)
+    [-30,-40,-40,-50,-50,-40,-40,-30],  # 7th rank (danger zone)
+    [-30,-40,-40,-50,-50,-40,-40,-30],  # 8th rank (danger zone)
+]
+
+# King PST (Endgame): Centralization becomes important
+KING_ENDGAME_PST = [
+    [-50,-40,-30,-20,-20,-30,-40,-50],  # 1st rank (edge is bad)
+    [-30,-20,-10,  0,  0,-10,-20,-30],  # 2nd rank
+    [-30,-10, 20, 30, 30, 20,-10,-30],  # 3rd rank
+    [-30,-10, 30, 40, 40, 30,-10,-30],  # 4th rank (center is good)
+    [-30,-10, 30, 40, 40, 30,-10,-30],  # 5th rank (center is good)
+    [-30,-10, 20, 30, 30, 20,-10,-30],  # 6th rank
+    [-30,-20,-10,  0,  0,-10,-20,-30],  # 7th rank
+    [-50,-40,-30,-20,-20,-30,-40,-50],  # 8th rank (edge is bad)
+]
+
+# Search and evaluation constants
 MAX_QUIESCENCE_DEPTH = 8
 MATE_SCORE = 30000
 CHECKMATE_BONUS = 900000
@@ -90,76 +137,25 @@ class TTEntry:
     best_move: Optional[chess.Move]
     age: int
 
-class ChessEngineTemplate:
+class PositionalOpponent:
     """
-    Base chess engine template with complete search infrastructure.
+    Positional chess engine using piece-square tables for evaluation.
     
-    This class provides all the necessary components for a functional chess engine:
-    - Complete search algorithm (minimax with alpha-beta)
-    - Move ordering and pruning techniques
-    - Transposition table management
-    - Time management
-    - UCI protocol support
-    
-    CUSTOMIZATION GUIDE:
-    ====================
-    
-    REQUIRED Override:
-    ------------------
-    - _evaluate_position(): Your main evaluation function
-    
-    OPTIONAL Overrides (for specialized engines):
-    ---------------------------------------------
-    - _get_approximate_piece_value(): Custom values for move ordering
-    - _quiescence_search(): Custom quiescence behavior
-    - _order_moves(): Custom move ordering logic
-    - _calculate_time_limit(): Custom time management
-    
-    DO NOT Override (unless you know what you're doing):
-    ---------------------------------------------------
-    - _search(): Core search algorithm
-    - _probe_tt() / _store_tt_entry(): Transposition table
-    - _get_zobrist_key(): Position hashing
-    - get_best_move(): Iterative deepening controller
-    
-    EVALUATION STRATEGIES:
-    =====================
-    
-    Material-Based Engines:
-    - Pass piece_values dict to constructor
-    - Use _evaluate_material_simple() or create custom material eval
-    
-    Positional Engines (PSTs):
-    - Don't pass piece_values (will be None)
-    - Override _evaluate_position() with PST lookup
-    
-    Mobility/Coverage Engines:
-    - Don't pass piece_values
-    - Override _evaluate_position() with dynamic calculation
-    
-    Hybrid Engines:
-    - Combine multiple evaluation factors in _evaluate_position()
+    This engine evaluates positions based entirely on piece placement rather
+    than static material values. Each piece's value is determined by its
+    position on the board using comprehensive piece-square tables.
     """
     
-    def __init__(self, max_depth: int = 6, tt_size_mb: int = 128, 
-                 engine_name: str = "Template Engine", piece_values: Optional[Dict] = None):
+    def __init__(self, max_depth: int = 10, tt_size_mb: int = 256):
         """
-        Initialize the chess engine template
+        Initialize the positional chess engine
         
         Args:
             max_depth: Maximum search depth
             tt_size_mb: Transposition table size in MB
-            engine_name: Name of the engine for UCI identification
-            piece_values: Optional piece values dict (for material-based engines)
-                         Pass None for positional/mobility-based engines
         """
         self.board = chess.Board()
         self.max_depth = max_depth
-        self.engine_name = engine_name
-        
-        # piece_values is now truly optional - None for non-material engines
-        self.piece_values = piece_values.copy() if piece_values else None
-        
         self.start_time = 0
         self.time_limit = 0
         self.nodes_searched = 0
@@ -260,126 +256,87 @@ class ChessEngineTemplate:
         else:  # < 1 minute
             return min(time_left / 10 + increment * 0.8, 5)
     
-    def _get_approximate_piece_value(self, piece_type: int) -> int:
+    def _get_piece_square_value(self, piece: chess.Piece, square: chess.Square, is_endgame: bool = False) -> int:
         """
-        Get approximate piece value for move ordering (MVV-LVA, promotions)
-        
-        This is separate from evaluation and used internally for:
-        - MVV-LVA capture ordering
-        - Promotion move scoring
-        - Other move ordering heuristics
-        
-        Can be overridden for custom move ordering behavior.
+        Get the value of a piece based on its position using piece-square tables
         
         Args:
-            piece_type: chess.PAWN, chess.KNIGHT, etc.
+            piece: The chess piece
+            square: The square the piece is on
+            is_endgame: Whether we're in the endgame (affects king PST)
             
         Returns:
-            Approximate relative value (1-9 scale)
+            Value of the piece in this position (centipawns)
         """
-        return MOVE_ORDERING_VALUES.get(piece_type, 0)
+        rank = chess.square_rank(square)
+        file = chess.square_file(square)
+        
+        # For black pieces, flip the rank to get the equivalent white perspective
+        if piece.color == chess.BLACK:
+            rank = 7 - rank
+            
+        piece_type = piece.piece_type
+        
+        if piece_type == chess.PAWN:
+            value = PAWN_PST[rank][file]
+        elif piece_type == chess.KNIGHT:
+            value = KNIGHT_PST[rank][file]
+        elif piece_type == chess.BISHOP:
+            value = BISHOP_PST[rank][file]
+        elif piece_type == chess.ROOK:
+            value = ROOK_PST[rank][file]
+        elif piece_type == chess.QUEEN:
+            value = QUEEN_PST[rank][file]
+        elif piece_type == chess.KING:
+            if is_endgame:
+                value = KING_ENDGAME_PST[rank][file]
+            else:
+                value = KING_MIDDLEGAME_PST[rank][file]
+        else:
+            value = 0
+            
+        return value if piece.color == chess.WHITE else -value
+    
+    def _is_endgame(self, board: chess.Board) -> bool:
+        """
+        Determine if we're in the endgame phase
+        Simple heuristic: endgame if queens are off or material is low
+        """
+        # Queens are gone
+        if not board.pieces(chess.QUEEN, chess.WHITE) and not board.pieces(chess.QUEEN, chess.BLACK):
+            return True
+            
+        # Low material count (each side has less than a rook + minor piece)
+        white_material = (len(board.pieces(chess.ROOK, chess.WHITE)) * 500 +
+                         len(board.pieces(chess.BISHOP, chess.WHITE)) * 300 +
+                         len(board.pieces(chess.KNIGHT, chess.WHITE)) * 300 +
+                         len(board.pieces(chess.QUEEN, chess.WHITE)) * 900)
+        
+        black_material = (len(board.pieces(chess.ROOK, chess.BLACK)) * 500 +
+                         len(board.pieces(chess.BISHOP, chess.BLACK)) * 300 +
+                         len(board.pieces(chess.KNIGHT, chess.BLACK)) * 300 +
+                         len(board.pieces(chess.QUEEN, chess.BLACK)) * 900)
+        
+        return white_material < 800 and black_material < 800
     
     def _evaluate_position(self, board: chess.Board) -> int:
         """
-        Evaluate the current position - OVERRIDE THIS METHOD IN SUBCLASSES
-        
-        This is the main evaluation function that defines your engine's strategy.
-        The template provides a simple baseline that uses piece_values if available.
-        
-        OVERRIDE THIS for custom engines:
-        - Material engines: Use piece counting with piece_values
-        - Positional engines: Use piece-square tables
-        - Mobility engines: Count legal moves, attacks
-        - Hybrid engines: Combine multiple factors
+        Evaluate the current position using piece-square tables
         
         Args:
             board: Current chess position
             
         Returns:
-            Evaluation score (positive = good for side to move)
-            Units depend on your evaluation (centipawns, mobility points, etc.)
+            Evaluation score in centipawns (positive = good for side to move)
         """
-        # Default: use material if piece_values provided, otherwise return 0
-        if self.piece_values:
-            return self._evaluate_material_simple(board)
-        else:
-            # Non-material engines must override this method
-            return 0
-    
-    def _evaluate_material_simple(self, board: chess.Board) -> int:
-        """
-        Simple material balance evaluation (baseline implementation)
-        
-        Only works if piece_values is set. Useful for material-based engines.
-        
-        Returns:
-            Evaluation score in centipawns (positive = good for white)
-        """
-        if not self.piece_values:
-            return 0
-            
         score = 0
+        is_endgame = self._is_endgame(board)
         
-        for piece_type in chess.PIECE_TYPES:
-            if piece_type == chess.KING:
-                continue
-                
-            white_count = len(board.pieces(piece_type, chess.WHITE))
-            black_count = len(board.pieces(piece_type, chess.BLACK))
-            piece_value = self.piece_values[piece_type]
-            score += (white_count - black_count) * piece_value
-        
-        return score if board.turn == chess.WHITE else -score
-    
-    def _evaluate_material_with_bishop_pairs(self, board: chess.Board) -> int:
-        """
-        Material evaluation with dynamic bishop pair evaluation (example implementation)
-        Shows how to extend the basic evaluation with additional heuristics.
-        
-        Returns:
-            Evaluation score in centipawns (positive = good for white)
-        """
-        if not self.piece_values:
-            return 0
-            
-        score = 0
-        bishop_pair_bonus = 50
-        bishop_alone_penalty = 50
-        
-        white_bishops = len(board.pieces(chess.BISHOP, chess.WHITE))
-        black_bishops = len(board.pieces(chess.BISHOP, chess.BLACK))
-        
-        for piece_type in chess.PIECE_TYPES:
-            if piece_type == chess.KING:
-                continue
-                
-            white_count = len(board.pieces(piece_type, chess.WHITE))
-            black_count = len(board.pieces(piece_type, chess.BLACK))
-            
-            if piece_type == chess.BISHOP:
-                # Dynamic bishop evaluation
-                white_bishop_value = self.piece_values[chess.BISHOP]
-                black_bishop_value = self.piece_values[chess.BISHOP]
-                
-                if white_bishops == 2:
-                    white_bishop_value += bishop_pair_bonus // 2
-                elif white_bishops == 1:
-                    white_bishop_value -= bishop_alone_penalty
-                    
-                if black_bishops == 2:
-                    black_bishop_value += bishop_pair_bonus // 2
-                elif black_bishops == 1:
-                    black_bishop_value -= bishop_alone_penalty
-                    
-                score += white_count * white_bishop_value - black_count * black_bishop_value
-            else:
-                piece_value = self.piece_values[piece_type]
-                score += white_count * piece_value - black_count * piece_value
-        
-        # Small bonus for piece count diversity (prefer pieces over pawns)
-        white_pieces = sum(len(board.pieces(pt, chess.WHITE)) for pt in chess.PIECE_TYPES if pt != chess.KING)
-        black_pieces = sum(len(board.pieces(pt, chess.BLACK)) for pt in chess.PIECE_TYPES if pt != chess.KING)
-        score += (white_pieces - black_pieces) * 5
+        # Sum up all piece values based on their positions
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if piece:
+                score += self._get_piece_square_value(piece, square, is_endgame)
         
         return score if board.turn == chess.WHITE else -score
     
@@ -428,11 +385,7 @@ class ChessEngineTemplate:
         return alpha
     
     def _mvv_lva_score(self, board: chess.Board, move: chess.Move) -> int:
-        """
-        Most Valuable Victim - Least Valuable Attacker scoring
-        
-        Uses approximate piece values for move ordering.
-        """
+        """Most Valuable Victim - Least Valuable Attacker scoring"""
         if not board.is_capture(move):
             return 0
             
@@ -441,11 +394,27 @@ class ChessEngineTemplate:
         
         if victim is None or attacker is None:
             return 0
-            
+        
+        # Use PST values for MVV-LVA (approximate piece values)
         victim_value = self._get_approximate_piece_value(victim.piece_type)
         attacker_value = self._get_approximate_piece_value(attacker.piece_type)
         
         return victim_value * 10 - attacker_value
+    
+    def _get_approximate_piece_value(self, piece_type: int) -> int:
+        """Get approximate piece value for MVV-LVA scoring"""
+        if piece_type == chess.PAWN:
+            return 100
+        elif piece_type == chess.KNIGHT:
+            return 300
+        elif piece_type == chess.BISHOP:
+            return 325
+        elif piece_type == chess.ROOK:
+            return 500
+        elif piece_type == chess.QUEEN:
+            return 900
+        else:
+            return 0
     
     def _order_moves(self, board: chess.Board, moves: List[chess.Move], ply: int, 
                      tt_move: Optional[chess.Move] = None) -> List[chess.Move]:
@@ -453,7 +422,7 @@ class ChessEngineTemplate:
         Order moves for better alpha-beta pruning
         
         Priority:
-        1. TT move (from transposition table)
+        1. TT move
         2. Checkmate threats
         3. Checks  
         4. Captures (MVV-LVA)
@@ -474,16 +443,16 @@ class ChessEngineTemplate:
             elif board.gives_check(move):
                 board.push(move)
                 if board.is_checkmate():
-                    score = CHECKMATE_BONUS
+                    score = 900000
                 else:
-                    score = CHECK_BONUS  # Regular checks
+                    score = 500000  # Regular checks
                 board.pop()
             # Captures
             elif board.is_capture(move):
-                score = CAPTURE_BONUS + self._mvv_lva_score(board, move)
+                score = 400000 + self._mvv_lva_score(board, move)
             # Killer moves
             elif ply < len(self.killer_moves) and move in self.killer_moves[ply]:
-                score = KILLER_BONUS
+                score = 300000
             # Pawn promotions
             elif move.promotion:
                 score = PROMOTION_BONUS + self._get_approximate_piece_value(move.promotion)
@@ -493,9 +462,9 @@ class ChessEngineTemplate:
                 if piece and piece.piece_type == chess.PAWN:
                     to_rank = chess.square_rank(move.to_square)
                     if board.turn == chess.WHITE and to_rank >= 5:
-                        score = PAWN_ADVANCE_BONUS + to_rank * 1000
+                        score = 100000 + to_rank * 1000
                     elif board.turn == chess.BLACK and to_rank <= 2:
-                        score = PAWN_ADVANCE_BONUS + (7 - to_rank) * 1000
+                        score = 100000 + (7 - to_rank) * 1000
                 else:
                     # History heuristic for other moves
                     key = (move.from_square, move.to_square)
@@ -685,44 +654,28 @@ class ChessEngineTemplate:
                 best_move = move
                 best_value = value
                 
-                # Output search info with flush for UCI output persistence
+                # Output search info with flush for persistence
                 nps = int(self.nodes_searched / max(search_time, 0.001))
                 print(f"info depth {depth} score cp {value} nodes {self.nodes_searched} "
                       f"nps {nps} time {int(search_time * 1000)} pv {move.uci()}")
-                sys.stdout.flush()  # Ensure output is visible immediately
+                sys.stdout.flush()
                 
             if self._is_time_up():
                 break
         
         total_time = time.time() - self.start_time
         print(f"info string Search completed in {total_time:.3f}s, {self.nodes_searched} nodes")
-        sys.stdout.flush()  # Ensure final message is visible
+        sys.stdout.flush()
         
         return best_move
 
 
-class UCIEngineInterface:
-    """
-    UCI interface for chess engines built on ChessEngineTemplate
+class UCIPositionalEngine:
+    """UCI interface for the positional chess engine"""
     
-    Handles all UCI protocol communication and works with any engine type:
-    - Material-based engines (with piece_values)
-    - Positional engines (PST-based)
-    - Mobility/Coverage engines
-    - Hybrid engines
-    """
-    
-    def __init__(self, engine_class=None, **engine_kwargs):
-        """
-        Initialize UCI interface with a chess engine
-        
-        Args:
-            engine_class: Class to instantiate (defaults to ChessEngineTemplate)
-            **engine_kwargs: Additional arguments passed to engine constructor
-        """
-        if engine_class is None:
-            engine_class = ChessEngineTemplate
-        self.engine = engine_class(**engine_kwargs)
+    def __init__(self):
+        """Initialize UCI interface with positional engine"""
+        self.engine = PositionalOpponent()
         
     def run(self):
         """Main UCI loop"""
@@ -733,28 +686,20 @@ class UCIEngineInterface:
                     continue
                     
                 if line == "uci":
-                    print(f"id name {self.engine.engine_name}")
+                    print("id name Positional Opponent v2.0")
                     print("id author OpponentEngine")
-                    print("option name MaxDepth type spin default 6 min 1 max 20")
-                    print("option name TTSize type spin default 128 min 16 max 1024")
+                    print("option name MaxDepth type spin default 10 min 1 max 20")
+                    print("option name TTSize type spin default 256 min 16 max 1024")
                     print("uciok")
-                    sys.stdout.flush()
                     
                 elif line == "isready":
                     print("readyok")
-                    sys.stdout.flush()
                     
                 elif line == "ucinewgame":
-                    # Recreate engine with same parameters
-                    engine_class = type(self.engine)
-                    kwargs = {
-                        'max_depth': self.engine.max_depth,
-                    }
-                    # Only include piece_values if the engine has it
-                    if hasattr(self.engine, 'piece_values') and self.engine.piece_values is not None:
-                        kwargs['piece_values'] = self.engine.piece_values.copy()
-                    
-                    self.engine = engine_class(**kwargs)
+                    self.engine = PositionalOpponent(
+                        max_depth=self.engine.max_depth,
+                        tt_size_mb=128
+                    )
                     
                 elif line.startswith("setoption"):
                     self._handle_setoption(line)
@@ -772,7 +717,6 @@ class UCIEngineInterface:
                 break
             except Exception as e:
                 print(f"info string Error: {e}", file=sys.stderr)
-                sys.stderr.flush()
     
     def _handle_setoption(self, line: str):
         """Handle UCI setoption command"""
@@ -785,16 +729,10 @@ class UCIEngineInterface:
                 self.engine.max_depth = max(1, min(20, int(value)))
             elif name == "TTSize":
                 tt_size = max(16, min(1024, int(value)))
-                engine_class = type(self.engine)
-                kwargs = {
-                    'max_depth': self.engine.max_depth,
-                    'tt_size_mb': tt_size,
-                }
-                # Only include piece_values if the engine has it
-                if hasattr(self.engine, 'piece_values') and self.engine.piece_values is not None:
-                    kwargs['piece_values'] = self.engine.piece_values.copy()
-                    
-                self.engine = engine_class(**kwargs)
+                self.engine = PositionalOpponent(
+                    max_depth=self.engine.max_depth,
+                    tt_size_mb=tt_size
+                )
     
     def _handle_position(self, line: str):
         """Handle UCI position command"""
@@ -822,7 +760,6 @@ class UCIEngineInterface:
         time_left = 0
         increment = 0
         depth_override = None
-        original_depth = None
         
         # Parse time controls
         for i, part in enumerate(parts):
@@ -835,8 +772,9 @@ class UCIEngineInterface:
             elif part == "binc" and self.engine.board.turn == chess.BLACK:
                 increment = float(parts[i + 1]) / 1000
             elif part == "depth":
-                # Override max depth for this search only
+                # Override max depth for this search and disable time management
                 depth_override = int(parts[i + 1])
+                # Store original depth to restore later
                 original_depth = self.engine.max_depth
                 self.engine.max_depth = depth_override
                 time_left = 0  # No time limit when depth is specified
@@ -845,76 +783,14 @@ class UCIEngineInterface:
         if depth_override:
             move = self.engine.get_best_move(time_left=0, increment=0)
             # Restore original depth
-            if original_depth is not None:
-                self.engine.max_depth = original_depth
+            self.engine.max_depth = original_depth
         else:
             move = self.engine.get_best_move(time_left, increment)
             
         print(f"bestmove {move.uci() if move else '0000'}")
-        sys.stdout.flush()
 
 
-# Example implementations demonstrating how to use the template
-
-class MaterialEngine(ChessEngineTemplate):
-    """Example: Simple material-only engine"""
-    
-    def __init__(self, **kwargs):
-        kwargs.setdefault('engine_name', 'Material Engine')
-        kwargs.setdefault('piece_values', DEFAULT_PIECE_VALUES.copy())
-        super().__init__(**kwargs)
-    
-    def _evaluate_position(self, board: chess.Board) -> int:
-        """Simple material balance evaluation"""
-        return self._evaluate_material_simple(board)
-
-
-class MaterialWithBishopPairs(ChessEngineTemplate):
-    """Example: Material engine with bishop pair evaluation"""
-    
-    def __init__(self, **kwargs):
-        kwargs.setdefault('engine_name', 'Material + Bishop Pairs')
-        kwargs.setdefault('piece_values', DEFAULT_PIECE_VALUES.copy())
-        super().__init__(**kwargs)
-    
-    def _evaluate_position(self, board: chess.Board) -> int:
-        """Material evaluation with dynamic bishop pairs"""
-        return self._evaluate_material_with_bishop_pairs(board)
-
-
-class CustomPieceValues(ChessEngineTemplate):
-    """Example: Engine with custom piece values"""
-    
-    def __init__(self, **kwargs):
-        custom_values = {
-            chess.PAWN: 100,
-            chess.KNIGHT: 320,     # Slightly higher value for knights
-            chess.BISHOP: 330,     # Slightly higher value for bishops
-            chess.ROOK: 500,
-            chess.QUEEN: 900,
-            chess.KING: 0
-        }
-        kwargs.setdefault('engine_name', 'Custom Values Engine')
-        kwargs.setdefault('piece_values', custom_values)
-        super().__init__(**kwargs)
-
-
-# Example of how to run different engines
+# Main execution
 if __name__ == "__main__":
-    import sys
-    
-    # You can easily switch between different engine implementations
-    if len(sys.argv) > 1:
-        engine_type = sys.argv[1].lower()
-        if engine_type == "material":
-            interface = UCIEngineInterface(MaterialEngine)
-        elif engine_type == "bishops":
-            interface = UCIEngineInterface(MaterialWithBishopPairs)
-        elif engine_type == "custom":
-            interface = UCIEngineInterface(CustomPieceValues)
-        else:
-            interface = UCIEngineInterface()  # Default template
-    else:
-        interface = UCIEngineInterface()  # Default template
-    
-    interface.run()
+    uci_engine = UCIPositionalEngine()
+    uci_engine.run()

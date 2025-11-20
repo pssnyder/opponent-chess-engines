@@ -141,7 +141,7 @@ class ChessEngineTemplate:
     - Combine multiple evaluation factors in _evaluate_position()
     """
     
-    def __init__(self, max_depth: int = 6, tt_size_mb: int = 128, 
+    def __init__(self, max_depth: int = 8, tt_size_mb: int = 256, 
                  engine_name: str = "Template Engine", piece_values: Optional[Dict] = None):
         """
         Initialize the chess engine template

@@ -50,7 +50,7 @@ class TTEntry:
     age: int
 
 class MaterialOpponent:
-    def __init__(self, max_depth: int = 6, tt_size_mb: int = 128):
+    def __init__(self, max_depth: int = 10, tt_size_mb: int = 256):
         """
         Initialize the Material Opponent engine
         

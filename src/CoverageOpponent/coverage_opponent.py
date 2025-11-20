@@ -68,7 +68,7 @@ class CoverageOpponent:
     piece activity over traditional material considerations.
     """
     
-    def __init__(self, max_depth: int = 6, tt_size_mb: int = 128):
+    def __init__(self, max_depth: int = 10, tt_size_mb: int = 256):
         """
         Initialize the coverage chess engine
         
